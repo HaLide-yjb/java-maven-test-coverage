@@ -1,0 +1,4 @@
+interface:
+  display_name: "Java 软件测试与覆盖率"
+  short_description: "只在原项目唯一测试类内按目标类分区，限时验证并持续记录覆盖率阻碍"
+  default_prompt: "使用 $java-maven-test-coverage 为这个 Maven 项目编写测试，只在原项目已有的唯一 *Test.java 测试类内按注释分区，保持原类名，禁止新增或拆分测试类，限时运行并维护同一份测试覆盖率阻碍说明.md。"
