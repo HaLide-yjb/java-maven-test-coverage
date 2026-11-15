@@ -19,15 +19,38 @@ param(
     [switch]$Clean,
     [switch]$FreshJacoco,
     [string]$PitReportsDirectory,
+    [DateTimeOffset]$PitDeadlineUtc,
     [string[]]$JvmArgument = @(),
     [string[]]$MavenOption = @(),
     [switch]$LauncherConfigReviewed
 )
 $ErrorActionPreference = 'Stop'
+$enteredAt = [DateTimeOffset]::UtcNow
+if ($TimeoutSeconds -eq 0) { $TimeoutSeconds = if ($Goal -eq 'Pit') { 600 } else { 120 } }
+$hasPitDeadline = $PSBoundParameters.ContainsKey('PitDeadlineUtc')
+if ($hasPitDeadline -and $Goal -ne 'Pit') { throw 'PitDeadlineUtc is only supported for Goal Pit.' }
+$pitDeadline = $null
+$pitStopBy = $null
+if ($Goal -eq 'Pit') {
+    $pitDeadline = $enteredAt.AddSeconds($TimeoutSeconds)
+    if ($hasPitDeadline -and $PitDeadlineUtc -lt $pitDeadline) {
+        $pitDeadline = $PitDeadlineUtc.ToUniversalTime()
+    }
+    # 给进程树终止和日志收尾预留时间，短预算最多留一半。
+    $budgetMs = [Math]::Max(0, ($pitDeadline - $enteredAt).TotalMilliseconds)
+    $reserveMs = [Math]::Min(10000, $budgetMs / 2)
+    $pitStopBy = $pitDeadline.AddMilliseconds(-$reserveMs)
+}
+
+# 返回绝对截止时间前可等待的毫秒数，同时遵守单次等待的上限。
+function Get-DeadlineWaitMilliseconds([DateTimeOffset]$deadline, [int]$maxWait) {
+    $remaining = [Math]::Floor(($deadline - [DateTimeOffset]::UtcNow).TotalMilliseconds)
+    return [int][Math]::Max(0, [Math]::Min($maxWait, $remaining))
+}
+
 $project = (Resolve-Path -LiteralPath $ProjectPath).Path
 $pomPath = Join-Path $project 'pom.xml'
 if (-not (Test-Path -LiteralPath $pomPath -PathType Leaf)) { throw 'ProjectPath must contain pom.xml.' }
-if ($TimeoutSeconds -eq 0) { $TimeoutSeconds = if ($Goal -eq 'Pit') { 180 } else { 120 } }
 if ($TestFilter -and $Goal -ne 'Test') { throw 'TestFilter is only supported for Goal Test.' }
 if (($JacocoAgentPath -or $FreshJacoco) -and $Goal -ne 'Test') {
     throw 'JacocoAgentPath and FreshJacoco are only supported for Goal Test.'
@@ -199,6 +222,7 @@ foreach ($argument in $arguments) { $info.ArgumentList.Add($argument) }
 $process = [Diagnostics.Process]::new()
 $process.StartInfo = $info
 $started = $false
+$ownedPid = $null
 $expired = $false
 $exitCode = 1
 $startedAt = [DateTimeOffset]::UtcNow
@@ -208,29 +232,46 @@ $stderrFile = $null
 try {
     $stdoutFile = [IO.FileStream]::new($stdoutPath, 'Create', 'Write', 'ReadWrite', 1, $true)
     $stderrFile = [IO.FileStream]::new($stderrPath, 'Create', 'Write', 'ReadWrite', 1, $true)
-    [void]$process.Start()
-    $started = $true
-    $ownedPid = $process.Id
-    $stdout = $process.StandardOutput.BaseStream.CopyToAsync($stdoutFile)
-    $stderr = $process.StandardError.BaseStream.CopyToAsync($stderrFile)
-    while (-not $process.WaitForExit(500)) {
-        if ($watch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
-            $expired = $true
-            $process.Kill($true)
-            [void]$process.WaitForExit(5000)
-            break
+    $drained = $true
+    if ($pitStopBy -and [DateTimeOffset]::UtcNow -ge $pitStopBy) {
+        $expired = $true
+    } else {
+        [void]$process.Start()
+        $started = $true
+        $ownedPid = $process.Id
+        $stdout = $process.StandardOutput.BaseStream.CopyToAsync($stdoutFile)
+        $stderr = $process.StandardError.BaseStream.CopyToAsync($stderrFile)
+        while ($true) {
+            $poll = if ($pitStopBy) { Get-DeadlineWaitMilliseconds $pitStopBy 500 } else { 500 }
+            if ($process.WaitForExit($poll)) { break }
+            $atLimit = if ($pitStopBy) {
+                (Get-DeadlineWaitMilliseconds $pitStopBy 1) -eq 0
+            } else {
+                $watch.Elapsed.TotalSeconds -ge $TimeoutSeconds
+            }
+            if ($atLimit) {
+                $expired = $true
+                $process.Kill($true)
+                $stopWait = if ($pitDeadline) { Get-DeadlineWaitMilliseconds $pitDeadline 5000 } else { 5000 }
+                [void]$process.WaitForExit($stopWait)
+                break
+            }
         }
+        $drainWait = if ($pitDeadline) { Get-DeadlineWaitMilliseconds $pitDeadline 5000 } else { 5000 }
+        $drained = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdout, $stderr), $drainWait)
     }
-    $drained = [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdout, $stderr), 5000)
     $utf8 = [Text.UTF8Encoding]::new($false)
-    $exitCode = if ($expired) { 124 } else { $process.ExitCode }
     $protectedChanges = @(Get-SnapshotChanges $before (Get-ProtectedSnapshot))
     $testChanges = @(Get-SnapshotChanges $testBefore (Get-TestSnapshot))
+    if ($pitDeadline -and [DateTimeOffset]::UtcNow -ge $pitDeadline) { $expired = $true }
+    $exitCode = if ($expired) { 124 } else { $process.ExitCode }
     if (($protectedChanges.Count -gt 0 -or $testChanges.Count -gt 0) -and $exitCode -eq 0) { $exitCode = 3 }
     $result = [ordered]@{
         project = $project; goal = $Goal; test_filter = $TestFilter
         started_at_utc = $startedAt.ToString('o'); finished_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
         pid = $ownedPid; timeout_seconds = $TimeoutSeconds; timed_out = $expired
+        pit_deadline_utc = if ($pitDeadline) { $pitDeadline.ToString('o') }
+        wall_elapsed_seconds = [Math]::Round(([DateTimeOffset]::UtcNow - $enteredAt).TotalSeconds, 2)
         elapsed_seconds = [Math]::Round($watch.Elapsed.TotalSeconds, 2); exit_code = $exitCode
         output_complete = $drained; protected_files_unchanged = ($protectedChanges.Count -eq 0)
         protected_changes = $protectedChanges; test_sources_unchanged = ($testChanges.Count -eq 0)

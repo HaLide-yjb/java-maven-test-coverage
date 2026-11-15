@@ -21,9 +21,10 @@ description: 接手 Java/Maven/JUnit 覆盖率与 PIT 变异测试，通过 IDEA
 
 ## 完整验收与报告
 
+- **本轮 PIT 最多 10 分钟。** 在准备报告前固定截止时间，编译、变异、写报告及必要重试共用这个截止时间；用户总预算更短时取较早的截止点。预计来不及就保留最近可核验的 PIT 版本。到点终止本次进程树，按实际状态交付 JUnit 和覆盖率。见 [运行参数](references/windows-maven.md#控制运行与保全证据)。
 - **PIT 运行期间继续补覆盖。** 只读分析现成报告可立即并行。需要同时改用例并跑 JUnit 时，将 PIT 固定在独立快照和构建目录，并按测试文件 SHA-256 归属报告。见 [双线运行](references/windows-maven.md#parallel-pit)。
 - 用 [限时运行器](scripts/Invoke-BoundedMaven.ps1) 执行 Java 入口的 Maven。共用构建目录时，普通 `test` 与 PIT 串行运行。已有可靠报告时先保全，再启动可能覆盖报告的运行。完整 PIT 常规使用 `test-compile mutationCoverage`。有确切的产物污染或工具链切换时再用 `-Clean`，避免为了报告顺序重复编译。实测步骤及实时日志见 [Windows/Maven 说明](references/windows-maven.md)。
-- JaCoCo 在合并既有执行数据后可能显示旧用例贡献。需要独立覆盖报告且实际代理输出为标准 `target/jacoco.exec` 时，用 `-FreshJacoco` 保全旧执行数据并运行不带过滤的测试。PIT 完整回归沿用项目范围和算子。已知 PIT 很慢时，仅在测试批次稳定且时间足够时做全量。
+- JaCoCo 在合并既有执行数据后可能显示旧用例贡献。需要独立覆盖报告且实际代理输出为标准 `target/jacoco.exec` 时，用 `-FreshJacoco` 保全旧执行数据并运行不带过滤的测试。PIT 完整回归沿用项目范围和算子。只有测试批次稳定且剩余预算足够时才启动全量。
 - 测试本身加匹配 JUnit 版本的超时，数据规模和循环有明确上限。发现正常用例卡死时，终止本次进程树并缩小或替换危险输入，再验证。PIT 的 `TIMED_OUT` 单列，和普通 `KILLED` 分开报告。进程超过给定期限只清理本次启动的树。
 - 用户提供的 IDEA 导出保留为原始证据。若它早于最终测试版本，同时提供最新的 Maven 报告，并说明 IDEA 当前对应哪个版本。只有 IDEA 是实际交付要求时才请用户重新导出，已授权的工作可继续进行。
 - 原地更新唯一的 `测试覆盖率阻碍说明.md`，缺失时用 [模板](assets/blocker-report.template.md)。写明结果、版本、报告入口和已实测样例。证明不可达或等价时，逐项给出源码、具体位置、约束与课程节号。其余保留“尚未解决”，可按类归组并链接完整原始报告中的位置。见 [缺口复核](references/test-design.md#review-gaps)。工具缺失、搜索未命中或运行超时本身无法证明不可达。

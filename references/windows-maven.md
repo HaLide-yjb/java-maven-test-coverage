@@ -11,7 +11,8 @@ python $reader --project $projectDir --top 12
 python $reader --project $projectDir --top 12 --rank-by line
 python $reader --project $projectDir --focus ExamGradingService
 & $runner -ProjectPath $projectDir -Goal Test -FreshJacoco -LogDirectory $testLog
-& $runner -ProjectPath $projectDir -Goal Pit -TimeoutSeconds $pitBudget -LogDirectory $pitLog -PitReportsDirectory $pitNew
+$pitDeadline = [DateTimeOffset]::UtcNow.AddMinutes(10)
+& $runner -ProjectPath $projectDir -Goal Pit -PitDeadlineUtc $pitDeadline -LogDirectory $pitLog -PitReportsDirectory $pitNew
 python $reader --project $projectDir --pit-report $pitNew --top 12
 ```
 
@@ -19,7 +20,8 @@ python $reader --project $projectDir --pit-report $pitNew --top 12
 
 ## 控制运行与保全证据
 
-- Test 默认 120 秒，Pit 默认 180 秒。TimeoutSeconds 可按最近实测调整，最大 600 秒。超时退出码为 124，只终止本次启动的 Java/Maven 进程树。给用户截止时间留出验证和交付时间。
+- Test 默认 120 秒。本轮 PIT 的总预算最多 600 秒，从准备报告前开始计算。设置 PitDeadlineUtc，并与用户总截止时间取较早者。所有尝试沿用同一个截止时间，预计剩余时间不够时先交已有验证结果。
+- PIT 运行器取 PitDeadlineUtc 与自身 TimeoutSeconds 的较早截止点，提前为终止和日志收尾留出时间。到点退出码为 124，只终止本次进程树。检查 result.json 的 pit_deadline_utc、退出码和完整报告，再引用 PIT 结果。
 - 设置独立的 LogDirectory 后，可在运行时查看 stdout.log 与 stderr.log，并用 srg 搜索日志。完成后读取 result.json 的退出码、耗时、output_complete 和文件变化。受保护文件或测试源码中途发生变化时，即使 Maven 成功也返回 3。
 - Test、PIT 和 IDEA 编译共用构建目录时串行运行。并行验证使用下节的独立快照。
 - 完整 PIT 常规执行 test-compile 和 mutationCoverage。Clean 只在残留 .class、工具链切换等实际需要时启用。它删除整个构建目录。启用前检查 POM 是否使用自定义输出位置，保存所需的完整报告。
@@ -36,6 +38,7 @@ python $reader --project $projectDir --pit-report $pitNew --top 12
 单模块项目可按下面的方式准备 PIT 快照。多模块或引用相邻文件的项目应保留整个构建布局，并核对 POM、配置文件和测试资源中实际写入的路径。复制时选择构建输入，跳过已有的 target 和报告目录。testRelative 是前面已锁定的原始测试文件相对路径。
 
 ```powershell
+$pitDeadline = [DateTimeOffset]::UtcNow.AddMinutes(10)
 $snapshot = Join-Path ([IO.Path]::GetTempPath()) ('coverage-pit-' + [Guid]::NewGuid().ToString('n'))
 [void](New-Item -ItemType Directory -Path $snapshot)
 foreach ($inputPath in @('pom.xml', 'src', '.mvn')) {
@@ -52,10 +55,10 @@ if ($currentHash -ne $testedHash) { throw 'Test changed during snapshot creation
 在一个 PowerShell 7 会话中用限时运行器执行快照的 PIT，并记录上述 SHA-256。另一会话用报告读取器按分支排序，定向读源码，在原测试文件中补用例，并用原项目独立的 target 跑短回归或全量 JUnit。需要 fresh JaCoCo 且使用标准执行数据路径时，沿用 FreshJacoco。
 
 ```powershell
-& $runner -ProjectPath $snapshot -Goal Pit -TimeoutSeconds $pitBudget -LogDirectory $pitLog
+& $runner -ProjectPath $snapshot -Goal Pit -PitDeadlineUtc $pitDeadline -LogDirectory $pitLog
 ```
 
-快照报告用快照路径核验，工作目录报告用工作目录核验。PIT 可能在工作目录的新测试写完之后才结束，此时报告时间较新也仍对应旧哈希。可以用该报告指导下一轮，最终提交的 PIT 指标以该提交版本实际运行的结果为准。只有待验收版本变化且任务仍需要完整变异验证时，再为最终版本跑一次。截止前先交已通过的测试及覆盖率，标明已有 PIT 对应的版本。
+快照报告用快照路径核验，工作目录报告用工作目录核验。PIT 可能在工作目录的新测试写完之后才结束，此时报告时间较新也仍对应旧哈希。可以用该报告指导下一轮，最终提交的 PIT 指标以该提交版本实际运行的结果为准。待验收版本变化时，先看本轮 PIT 剩余预算，再决定是否对最终版本补完整验证。截止前先交已通过的测试及覆盖率，标明已有 PIT 对应的版本。
 
 ## 中文路径与 JaCoCo
 

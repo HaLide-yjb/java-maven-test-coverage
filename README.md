@@ -52,7 +52,7 @@ mvn test
 mvn test-compile org.pitest:pitest-maven:mutationCoverage
 ```
 
-Windows 使用 PowerShell 7，由随包运行器通过原生 Java 入口执行 Maven。日志实时写入，PIT 可用独立报告目录。用报告读取器的 `--top` 定位缺口、用 `--focus` 展开明细。只有 IDEA 属于实际验收要求时，才安排使用者导出最终版本。完整参数见 [Windows/Maven 说明](references/windows-maven.md)。
+Windows 使用 PowerShell 7，由随包运行器通过原生 Java 入口执行 Maven。日志实时写入，PIT 可用独立报告目录。本轮 PIT 的编译、执行和重试共用最多 10 分钟。用报告读取器的 `--top` 定位缺口、用 `--focus` 展开明细。只有 IDEA 属于实际验收要求时，才安排使用者导出最终版本。完整参数见 [Windows/Maven 说明](references/windows-maven.md)。
 
 ## 目录
 
