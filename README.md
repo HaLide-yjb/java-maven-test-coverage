@@ -45,16 +45,14 @@
 并持续更新项目原有的测试覆盖率阻碍说明.md。
 ```
 
-对应的 Maven 目标：
+先读最新报告并锁定高收益缺口。用户临近截止时，优先交付已通过完整 JUnit 的单文件版本，列出报告对应的版本和原始计数。
 
 ```text
 mvn test
-mvn clean test-compile org.pitest:pitest-maven:mutationCoverage
+mvn test-compile org.pitest:pitest-maven:mutationCoverage
 ```
 
-Windows 使用 PowerShell 7。随包运行器通过原生 Java 入口执行 Maven，不额外嵌套 cmd；test 默认限时 120 秒，PIT 默认限时 180 秒。PIT 的 clean 会清除 target，必要时在 PIT 完成后再运行 test，以同时保留两份最新报告。
-
-IDEA 覆盖率需由使用者对原始唯一测试类执行 **Run with Coverage** 并导出 HTML，再交给 Codex 核验。自动生成的 Maven/PIT 报告不能替代这一人工步骤。
+Windows 使用 PowerShell 7，由随包运行器通过原生 Java 入口执行 Maven。日志实时写入，PIT 可用独立报告目录。用报告读取器的 `--top` 定位缺口、用 `--focus` 展开明细。只有 IDEA 属于实际验收要求时，才安排使用者导出最终版本。完整参数见 [Windows/Maven 说明](references/windows-maven.md)。
 
 ## 目录
 

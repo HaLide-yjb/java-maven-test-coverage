@@ -1,71 +1,72 @@
-# Windows/Maven 运行、排错和分享
+# Windows/Maven 运行与报告
 
-## 调用
+## 快速接手
 
-脚本依赖 PowerShell 7 与本机已有 JDK/Maven；报告读取器只依赖 Python 3 标准库，无需额外 pip 安装。
-
-从允许执行的非登录 PowerShell 7 运行技能目录中的脚本。ProjectPath 必填；JavaHome/MavenHome 可显式指定，否则读取 JAVA_HOME、MAVEN_HOME/M2_HOME，最后从 PATH 定位；只读取 mvn 路径，**不执行 mvn.cmd，也不增加 cmd.exe /c shell 层**。
+PowerShell 7 非登录模式运行。运行器优先使用显式指定的 JavaHome 和 MavenHome，其次读取本机环境。PATH 的 java 与 JAVA_HOME 可能不同。启动错误时用 Goal Version 的 stdout.log 核对真实版本。MavenHome 接受安装根目录或 bin，运行器直接用 Java 调用 Maven。
 
 ```powershell
-$skillDir = '当前技能的绝对目录'
-$projectDir = '当前项目的绝对目录'
-& (Join-Path $skillDir 'scripts/Invoke-BoundedMaven.ps1') -ProjectPath $projectDir -Goal Version
-& (Join-Path $skillDir 'scripts/Invoke-BoundedMaven.ps1') -ProjectPath $projectDir -Goal Test
-& (Join-Path $skillDir 'scripts/Invoke-BoundedMaven.ps1') -ProjectPath $projectDir -Goal Pit
-& (Join-Path $skillDir 'scripts/Invoke-BoundedMaven.ps1') -ProjectPath $projectDir -Goal Test
-python (Join-Path $skillDir 'scripts/read_coverage.py') --project $projectDir
+$runner = Join-Path $skillDir 'scripts/Invoke-BoundedMaven.ps1'
+$reader = Join-Path $skillDir 'scripts/read_coverage.py'
+python $reader --project $projectDir --top 12
+python $reader --project $projectDir --top 12 --rank-by line
+python $reader --project $projectDir --focus ExamGradingService
+& $runner -ProjectPath $projectDir -Goal Test -FreshJacoco -LogDirectory $testLog
+& $runner -ProjectPath $projectDir -Goal Pit -TimeoutSeconds $pitBudget -LogDirectory $pitLog -PitReportsDirectory $pitNew
+python $reader --project $projectDir --pit-report $pitNew --top 12
 ```
 
-在工具提供 shell 选择器时用 shell=pwsh、非登录模式。不要用 Windows PowerShell 5.1、cmd、Bash 或 WSL 编排。Maven 插件内部可能使用自己的进程启动机制，这与额外嵌套一个命令 shell 来编排工具不同。
+示例中的目录和时间预算由调用者按本机环境设置。FreshJacoco 适用于已确认使用 target/jacoco.exec 的项目。PitReportsDirectory 是本轮专用空目录。若 POM 写死 reportsDirectory，先核实 Maven 实际写入的地方。用户需要标准打包路径时，在运行成功、版本相符并核对完整报告后再放入目标目录。
 
-本机 PATH 的 java 与 JAVA_HOME 可能不一致；使用 Version 的 stdout.log 检查真实 Java、Maven 版本。项目需要 JDK 21 而 PATH 指向 17 时，选已有 JDK 21 并传 JavaHome，不改 compiler.source/target。
+## 控制运行与保全证据
 
-## 参数及退出状态
+- Test 默认 120 秒，Pit 默认 180 秒。TimeoutSeconds 可按最近实测调整，最大 600 秒。超时退出码为 124，只终止本次启动的 Java/Maven 进程树。给用户截止时间留出验证和交付时间。
+- 设置独立的 LogDirectory 后，可在运行时查看 stdout.log 与 stderr.log，并用 srg 搜索日志。完成后读取 result.json 的退出码、耗时、output_complete 和文件变化。受保护文件或测试源码中途发生变化时，即使 Maven 成功也返回 3。
+- Test、PIT 和 IDEA 编译共用构建目录时串行运行。并行验证使用下节的独立快照。
+- 完整 PIT 常规执行 test-compile 和 mutationCoverage。Clean 只在残留 .class、工具链切换等实际需要时启用。它删除整个构建目录。启用前检查 POM 是否使用自定义输出位置，保存所需的完整报告。
+- FreshJacoco 把已有 target/jacoco.exec 移入日志目录，再执行 test。核对新执行文件的时间和 XML 生成情况。过滤运行产生的报告属于目标分区，交付全量时运行无过滤验证。
+- TestFilter 示例为 StudentTest#testPricingBoundaries。一般补一批用例后直接执行完整 test。某个分区失败时才缩小验证范围。PIT 的 TestCompile 阶段只做编译。
+- MavenOption 可传入经核对的 CLI 设置。实测有益时可设置 PIT 线程数，保留目标类和变异算子。若 MAVEN_OPTS、MAVEN_ARGS 或 .mvn/jvm.config 已配置，核对并通过 JvmArgument/MavenOption 传递等效设置，再指定 LauncherConfigReviewed。.mvn/maven.config 由 Maven 读取。
 
-- Goal Test 默认 120 秒，Pit 默认 180 秒，可用 TimeoutSeconds 有界调整，最大 600 秒。到期退出码 124，只终止本次 Java/Maven 进程树。不要通过全局进程名杀掉用户其他 Java 或 IDEA 进程。
-- LogDirectory 可指定独立日志目录；默认位于系统临时目录的唯一运行目录。输出 JSON 和 result.json 包含期限、退出码、源码检查、日志位置。不要放到技能安装目录或共享压缩包内。
-- 完整 stdout/stderr 分开存储；定位日志内容用 srg。退出码 0 不代替用例数量、跳过数和报告的检查。
-- Maven 运行前后检查 src/main 的全部文件和 pom.xml。若这些文件变化，会报告 protected_changes，原成功退出码改为 3；不会自动回滚外部修改。这个检查不代替编辑测试前对其他配置和完整修改范围的人工核对。
-- TestFilter 只用于定位原始唯一测试类内的方法，如 `CreditCardValidatorTest#americanExpressLengthBoundaries`；不得为过滤或定位另建测试类，最终完整验收不得带过滤。
-- 如果存在 MAVEN_OPTS、MAVEN_ARGS 或 .mvn/jvm.config，脚本会要求先核对；通过 JvmArgument/MavenOption 参数数组提供等效启动设置，并指定 LauncherConfigReviewed。不要清空全局环境，也不要默默忽略原有选项。.mvn/maven.config 由 Maven 本身读取，同样需在预检时核对。
-- MavenOption 是经核对的 CLI 设置通道，不能用来跳过测试、缩小最终生产范围、替换变异算子或加入无关目标。
-- script 语法错误、环境缺失或前置检查失败时不一定生成 result.json，应根据实际错误更新项目原有说明，修复环境选择后再运行。
+<a id="parallel-pit"></a>
+
+## PIT 与覆盖率改进并行
+
+已有稳定测试版本且需要 PIT 数据时，启动 PIT 后继续处理报告上的可达缺口。只读查看现成的 IDEA 或 JaCoCo 报告可以直接并行。若要修改测试并运行 JUnit，把当前版本复制到独立构建目录供 PIT 使用，原目录继续维护下一版。两边各用自己的 target、覆盖执行文件和报告路径。
+
+单模块项目可按下面的方式准备 PIT 快照。多模块或引用相邻文件的项目应保留整个构建布局，并核对 POM、配置文件和测试资源中实际写入的路径。复制时选择构建输入，跳过已有的 target 和报告目录。testRelative 是前面已锁定的原始测试文件相对路径。
+
+```powershell
+$snapshot = Join-Path ([IO.Path]::GetTempPath()) ('coverage-pit-' + [Guid]::NewGuid().ToString('n'))
+[void](New-Item -ItemType Directory -Path $snapshot)
+foreach ($inputPath in @('pom.xml', 'src', '.mvn')) {
+    $item = Join-Path $projectDir $inputPath
+    if (Test-Path -LiteralPath $item) {
+        Copy-Item -LiteralPath $item -Destination $snapshot -Recurse
+    }
+}
+$testedHash = (Get-FileHash -LiteralPath (Join-Path $snapshot $testRelative)).Hash
+$currentHash = (Get-FileHash -LiteralPath (Join-Path $projectDir $testRelative)).Hash
+if ($currentHash -ne $testedHash) { throw 'Test changed during snapshot creation' }
+```
+
+在一个 PowerShell 7 会话中用限时运行器执行快照的 PIT，并记录上述 SHA-256。另一会话用报告读取器按分支排序，定向读源码，在原测试文件中补用例，并用原项目独立的 target 跑短回归或全量 JUnit。需要 fresh JaCoCo 且使用标准执行数据路径时，沿用 FreshJacoco。
+
+```powershell
+& $runner -ProjectPath $snapshot -Goal Pit -TimeoutSeconds $pitBudget -LogDirectory $pitLog
+```
+
+快照报告用快照路径核验，工作目录报告用工作目录核验。PIT 可能在工作目录的新测试写完之后才结束，此时报告时间较新也仍对应旧哈希。可以用该报告指导下一轮，最终提交的 PIT 指标以该提交版本实际运行的结果为准。只有待验收版本变化且任务仍需要完整变异验证时，再为最终版本跑一次。截止前先交已通过的测试及覆盖率，标明已有 PIT 对应的版本。
 
 ## 中文路径与 JaCoCo
 
-只有确认 POM 已配置代理，而 test 输出“missing execution data”或数据落到乱码路径时，才使用下述修复：
+只有 POM 已配置代理且日志确认为 missing execution data 或执行数据路径乱码时，使用 JacocoAgentPath。先从日志或本机 Maven 缓存定位对应版本的 runtime agent JAR。脚本临时使用相对路径 target/jacoco.exec。POM 已有 argLine 时，先保留其余 JVM 选项和其他所需代理，避免同一 JaCoCo 代理重复挂载，再通过 ExistingTestArgLine 提供。运行后以真实执行数据和 XML 验证。
 
-1. 从已有的 prepare-agent 日志定位匹配当前插件版本的 runtime agent JAR；不写死原作者 Maven 仓库或版本。
-2. 传入 JacocoAgentPath。脚本临时把代理输出改为 ASCII 相对路径 target/jacoco.exec，不修改 POM。
-3. 如果 POM 中有 argLine，先解析并通过 ExistingTestArgLine 保留其必要设置；不能覆盖调试、内存或其他代理参数，也不能重复挂载同一 JaCoCo 代理。脚本检测到现有 argLine 而未显式保留时会停止。
-4. 修复后检查实际 exec 文件及新报告时间，而不只是 BUILD SUCCESS。
-5. 不擅自修改系统编码、项目路径、全局 JDK/Maven 设置或构建配置。
+## 报告读取
 
-```powershell
-& (Join-Path $skillDir 'scripts/Invoke-BoundedMaven.ps1') -ProjectPath $projectDir -Goal Test -JavaHome '已有匹配JDK目录' -MavenHome '已有Maven目录' -JacocoAgentPath '现有匹配版本的runtime-agent.jar绝对路径'
-```
+报告读取器只读，依赖 Python 3.9 以上版本的标准库。
 
-## 读取报告
-
-`read_coverage.py` 只读 XML/HTML，不修改说明、不生成新的 Markdown、不运行 Maven。它输出：
-
-- JaCoCo 原始计数、缺失行/分支；
-- PIT 总览、状态分布和存活变异的类文件、方法及源码行；
-- 测试与生产源文件相对报告时间的新鲜度；
-- 手工 IDEA 目录的 JaCoCo 格式 HTML 总览；如果 target/classes 可匹配，另提供生产类范围。格式不支持或范围未知时如实返回警告。
-
-脚本不会自动把存活变异判为等价，也不把未覆盖行判为不可达。IDEA 非 JaCoCo 格式需人工按真实表头核对。修改过的源码比报告新、代码版本相同但运行会话不明等情况，还需要调用者核实；时间戳只是证据之一。
-
-## 分享与安装
-
-共享 ZIP 的根目录是 java-maven-test-coverage，内部有 SKILL.md、agents、scripts、references 和 assets；不包含用户目录、原项目测试答案、Maven 缓存、日志或历史项目报告。
-
-接收者先解压，然后把**整个** java-maven-test-coverage 文件夹放进自己 Codex 实际发现的用户技能目录。本机环境使用 CODEX_HOME/skills；当前官方文档列出的标准用户目录是用户主目录下的 .agents/skills。不要只拷贝 SKILL.md，也不要把同一技能重复复制到多个扫描目录。
-
-调用示例：
-
-```text
-使用 $java-maven-test-coverage 测试这个 Maven 项目，只在原项目已有的唯一 *Test.java 测试类内按注释分区，保持原文件名和类名，禁止新增或拆分测试类。
-```
-
-Codex 会自动检测技能变化；若列表未刷新，再重启 Codex。参考 [官方技能说明](https://learn.chatgpt.com/docs/build-skills)。
+- --top N 输出精简排行，优先使用 --rank-by branch 或 --rank-by line 指定当前目标。--focus 类名可展开源码行和 PIT 变异。需要完整归档时直接把全量 JSON 写入临时文件。
+- IDEA 原生 HTML 按真实表头读取类、方法、分支、行的计数。类页的红色和部分覆盖标记用于定位，可用分支数取自表格。核对 scope 和是否混用会话，再将总览用于交付。JaCoCo 格式的人工导出沿用已编译生产类映射。
+- Maven JaCoCo XML 提供生产代码计数和位置。Surefire XML 提供实际通过、失败、错误和跳过，结合 result.json 核对运行是否带过滤。
+- PIT 优先读 XML，取得实际算子、字节码索引与状态。--pit-report 可指定暂存报告目录或 XML。只有 HTML 时读取它的汇总和明细。KILLED、TIMED_OUT、SURVIVED 与 NO_COVERAGE 用原始计数。报告缺失、仍在生成或分母冲突时保留警告。
+- 时间戳用于发现可能的旧报告。把测试版本、构建退出码及报告范围一同复核。IDEA 是交付要求时，请用户对最终测试类运行 Run with Coverage 并导出。
